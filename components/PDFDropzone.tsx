@@ -1,6 +1,6 @@
 "use client";
 
-import uploadPDF from "@/actions/uploadPDF";
+import {uploadPDF} from "@/actions/uploadPDF";
 import { useUser } from "@clerk/nextjs";
 import {
   DndContext,
