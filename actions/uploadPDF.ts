@@ -49,13 +49,14 @@ export async function uploadPDF(formData: FormData) {
       headers: {
         "Content-Type": file.type,
       },
-      body: new Uint16Array(arrayBuffer),
+      body: new Uint8Array(arrayBuffer),
     });
 
     if (!uploadResponse.ok) {
       throw new Error(
         `Failed to upload the file: ${uploadResponse.statusText}`,
       );
+    
     }
     // Get storage Id
     const { storageId } = await uploadResponse.json();
