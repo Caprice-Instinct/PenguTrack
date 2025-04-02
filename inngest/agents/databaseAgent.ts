@@ -2,122 +2,87 @@ import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import convex from "@/lib/convexClient";
 import { client } from "@/lib/schematic";
-import { createAgent, createTool, openai } from "@inngest/agent-kit";
+import { createAgent, createTool } from "@inngest/agent-kit";
 import { z } from "zod";
 
+// Tool to call Gemini API
+const geminiTool = createTool({
+  name: "gemini-api-call",
+  description: "Calls Google Gemini API to process receipt data",
+  parameters: z.object({
+    messages: z.array(z.object({
+      role: z.string(),
+      content: z.string(),
+    })),
+  }),
+  handler: async ({ messages }) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: messages }),
+        }
+      );
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error("Gemini API Error:", error);
+      return { error: "Failed to call Gemini API" };
+    }
+  },
+});
+
+// Tool to save extracted data to the database
 const saveToDatabaseTool = createTool({
   name: "save-to-database",
-  description: "Saves the given data to the convex database",
+  description: "Saves extracted receipt data to the convex database",
   parameters: z.object({
-    fileDisplayName: z
-      .string()
-      .describe(
-        "The readable display name of the receipt to show in the UI. If the file name is not human readable, use this to give a more readable name.",
-      ),
-    receiptId: z.string().describe("The ID of the receipt to update"),
+    fileDisplayName: z.string(),
+    receiptId: z.string(),
     merchantName: z.string(),
     merchantAddress: z.string(),
     merchantContact: z.string(),
     transactionDate: z.string(),
-    transactionAmount: z
-      .number()
-      .describe(
-        "The total amount of the transaction, summing all the items on the receipts",
-      ),
-    receiptSummary: z
-      .string()
-      .describe(
-        "A summary of the receipt, incuding the merchant name, address, contact, transaction date, transaction amount, and currency. Include a human readable summary of the receipt. Mention both invoice number and receipt number if both are present. Include some key details about the items on the receipt, this is a special featured summary so it should include some key details about the items on the receipt with some context.",
-      ),
+    transactionAmount: z.number(),
+    receiptSummary: z.string(),
     currency: z.string(),
     items: z.array(
-      z
-        .object({
-          name: z.string(),
-          quantity: z.number(),
-          unitPrice: z.number(),
-          totalPrice: z.number(),
-        })
-        .describe(
-          "An array of items in the receipt. Include the name, quantity, unit price, and total price for each item.",
-        ),
+      z.object({
+        name: z.string(),
+        quantity: z.number(),
+        unitPrice: z.number(),
+        totalPrice: z.number(),
+      })
     ),
   }),
-  handler: async (params, context) => {
-    const {
-      fileDisplayName,
-      receiptId,
-      merchantName,
-      merchantAddress,
-      merchantContact,
-      transactionDate,
-      transactionAmount,
-      receiptSummary,
-      currency,
-      items,
-    } = params;
+  handler: async (params) => {
+    try {
+      const { receiptId, ...receiptData } = params;
 
-    const result = await context.step?.run(
-      "save-receipt-to-database",
-      async () => {
-        try {
-          // Call convex mutation
-          const { userId } = await convex.mutation(
-            api.receipts.updateReceiptWithExtractedData,
-            {
-              id: receiptId as Id<"receipts">,
-              fileDisplayName,
-              merchantName,
-              merchantAddress,
-              merchantContact,
-              transactionDate,
-              transactionAmount,
-              receiptSummary,
-              currency,
-              items,
-            },
-          );
+      // Save to convex database
+      const { userId } = await convex.mutation(
+        api.receipts.updateReceiptWithExtractedData,
+        { id: receiptId as Id<"receipts">, ...receiptData }
+      );
 
-        //   Trach event for schematic - scan flag
-        await client.track({
-            event: "scan",
-            company: {
-                id: userId,
-            },
-            user: {
-                id: userId,
-            },
-        })
+      // Track the event for analytics
+      await client.track({ event: "scan", company: { id: userId }, user: { id: userId } });
 
-        } catch (error) {
-          return {
-            addedToDb: "Failed",
-            error: error instanceof Error ? error.message : "Unknown error",
-          };
-        }
-      },
-    );
-
-    if (result?.addedToDb === "Success") {
-      // Set KV values if the operation was successful
-      context.network?.state.kv.set("saved-to-database", true);
-      context.network?.state.kv.set("receipt", receiptId);
+      return { addedToDb: "Success" };
+    } catch (error) {
+      return { addedToDb: "Failed", error: error.message || "Unknown error" };
     }
-    return result;
   },
 });
 
+// Define the agent using Gemini (via the custom tool)
 export const databaseAgent = createAgent({
   name: "Database Agent",
-  description:
-    "Responsible for taking key information regarding receipts and saving it to the convex dashboard.",
-  system:
-    "You are a helpful assistant that takes key information regarding receipts and saves it to the convex database",
-  model: openai({
-    model: "gpt-4o-mini",
-    defaultParameters: {
-      max_completion_tokens: 1000,
-    },
-  }),
-  tools: [saveToDatabaseTool],
+  description: "Processes receipt data and saves it to the database.",
+  system: "You process receipt data, structure it, and save it efficiently.",
+  tools: [geminiTool, saveToDatabaseTool], // Use Gemini API as a tool
 });
